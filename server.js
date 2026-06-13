@@ -1,260 +1,150 @@
-const { WebcastPushConnection } = require('tiktok-live-connector');
-const WebSocket = require('ws');
 const express = require('express');
+const { WebcastPushConnection } = require('tiktok-live-connector');
 
 const app = express();
-const HTTP_PORT = process.env.PORT || 3000;
-const WS_PORT = process.env.WS_PORT || 19131;
+app.use(express.json());
 
-// ── Kotak Config ─────────────────────────────────────
-const BOX = {
-  x1: 0,  y1: 64, z1: 0,
-  x2: 9,  y2: 78, z2: 9,
-  totalBlocks: 10 * 10 * 15
+const PORT = process.env.PORT || 3000;
+const ROBLOX_SECRET = process.env.ROBLOX_SECRET || 'roblox123';
+const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME || '';
+const TIKTOK_SESSION_ID = process.env.TIKTOK_SESSION_ID || '';
+
+// ============================================================
+// GIFT CONFIG
+// ============================================================
+
+const GIFT_RULES = {
+  'rose':   { type: 'jail',   seconds: 10  },
+  'mawar':  { type: 'jail',   seconds: 10  },
+  'rosa':   { type: 'jail',   seconds: 100 },
+  'coffee': { type: 'reduce', seconds: 5   },
+  'kopi':   { type: 'reduce', seconds: 5   },
 };
 
-// ── State Mini Game ───────────────────────────────────
-let countdownInterval = null;
-let countdownSeconds = 0;
-let checkInterval = null;
+// ============================================================
+// EVENT QUEUE
+// ============================================================
 
-// ── TikTok ───────────────────────────────────────────
-const tiktokLive = new WebcastPushConnection('leodandicaprio');
+const eventQueue = [];
 
-// ── WebSocket Server ──────────────────────────────────
-const wss = new WebSocket.Server({ port: WS_PORT });
-let minecraftSocket = null;
-
-wss.on('connection', (ws) => {
-  console.log('✅ Minecraft terhubung!');
-  minecraftSocket = ws;
-
-  const subscribe = JSON.stringify({
-    header: {
-      version: 1,
-      requestId: '00000000-0000-0000-0000-000000000001',
-      messagePurpose: 'subscribe',
-      messageType: 'commandRequest'
-    },
-    body: { eventName: 'PlayerMessage' }
-  });
-  ws.send(subscribe);
-
-  ws.on('message', (raw) => {
-    try {
-      const data = JSON.parse(raw);
-      if (data?.body?.statusCode !== undefined && data?.body?.successCount !== undefined) {
-        handleBlockCheckResponse(data.body.successCount);
-      }
-    } catch (e) {}
-  });
-
-  ws.on('close', () => {
-    console.log('❌ Minecraft disconnect');
-    minecraftSocket = null;
-    stopCountdown();
-    stopChecking();
-  });
-
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err.message);
-  });
-
-  setTimeout(() => {
-    buildBox();
-    startChecking();
-  }, 1000);
-});
-
-// ── Kirim Command ─────────────────────────────────────
-let cmdId = 1;
-
-function sendCommand(command) {
-  if (!minecraftSocket || minecraftSocket.readyState !== WebSocket.OPEN) return;
-
-  const msg = JSON.stringify({
-    header: {
-      version: 1,
-      requestId: `00000000-0000-0000-${String(cmdId).padStart(4, '0')}-${String(cmdId++).padStart(12, '0')}`,
-      messagePurpose: 'commandRequest',
-      messageType: 'commandRequest'
-    },
-    body: {
-      origin: { type: 'player' },
-      commandLine: command,
-      version: 1
-    }
-  });
-
-  minecraftSocket.send(msg);
+function pushEvent(event) {
+  event.timestamp = Date.now();
+  eventQueue.push(event);
+  console.log('[EVENT]', JSON.stringify(event));
 }
 
-// ── Buat Kotak Bedrock ────────────────────────────────
-function buildBox() {
-  console.log('🏗️ Membangun kotak bedrock...');
+// ============================================================
+// TIKTOK CONNECTION
+// ============================================================
 
-  sendCommand(`fill ${BOX.x1 + 1} ${BOX.y1} ${BOX.z1 + 1} ${BOX.x2 - 1} ${BOX.y2} ${BOX.z2 - 1} air`);
-  sendCommand(`fill ${BOX.x1} ${BOX.y1} ${BOX.z1} ${BOX.x2} ${BOX.y1} ${BOX.z2} bedrock`);
-  sendCommand(`fill ${BOX.x1} ${BOX.y1} ${BOX.z1} ${BOX.x2} ${BOX.y2} ${BOX.z1} bedrock`);
-  sendCommand(`fill ${BOX.x1} ${BOX.y1} ${BOX.z2} ${BOX.x2} ${BOX.y2} ${BOX.z2} bedrock`);
-  sendCommand(`fill ${BOX.x1} ${BOX.y1} ${BOX.z1} ${BOX.x1} ${BOX.y2} ${BOX.z2} bedrock`);
-  sendCommand(`fill ${BOX.x2} ${BOX.y1} ${BOX.z1} ${BOX.x2} ${BOX.y2} ${BOX.z2} bedrock`);
+let tiktokConnection = null;
 
-  console.log('✅ Kotak bedrock selesai!');
-  sendCommand(`tellraw @a {"rawtext":[{"text":"§b🏗️ Kotak bedrock siap! Mulai isi dengan block!"}]}`);
-}
-
-// ── Cek Isi Kotak ─────────────────────────────────────
-function startChecking() {
-  if (checkInterval) return;
-  checkInterval = setInterval(() => {
-    if (!minecraftSocket) return;
-    sendCommand(
-      `testforblocks ${BOX.x1} ${BOX.y1} ${BOX.z1} ${BOX.x2} ${BOX.y2} ${BOX.z2} ${BOX.x1} ${BOX.y1} ${BOX.z1} masked`
-    );
-  }, 2000);
-}
-
-function stopChecking() {
-  if (checkInterval) {
-    clearInterval(checkInterval);
-    checkInterval = null;
+function connectTikTok(username) {
+  if (tiktokConnection) {
+    tiktokConnection.disconnect();
   }
-}
 
-function handleBlockCheckResponse(successCount) {
-  const isFull = successCount >= BOX.totalBlocks;
+  tiktokConnection = new WebcastPushConnection(username, {
+    sessionId: TIKTOK_SESSION_ID,
+    enableExtendedGiftInfo: true,
+  });
 
-  if (isFull && !countdownInterval) {
-    startCountdown();
-  } else if (!isFull && countdownInterval) {
-    cancelCountdown();
-  }
-}
+  tiktokConnection.connect()
+    .then(state => console.log(`[TikTok] Connected: ${username} | Room: ${state.roomId}`))
+    .catch(err => console.error('[TikTok] Connect error:', err.message));
 
-// ── Countdown ─────────────────────────────────────────
-function startCountdown() {
-  console.log('🟢 Kotak penuh! Countdown dimulai...');
-  countdownSeconds = 10;
+  // --- GIFT ---
+  tiktokConnection.on('gift', (data) => {
+    const giftName = (data.giftName || '').toLowerCase().trim();
+    const rule = GIFT_RULES[giftName];
 
-  sendCommand(`tellraw @a {"rawtext":[{"text":"§a§lKOTAK PENUH! Countdown 10 detik dimulai!"}]}`);
-
-  countdownInterval = setInterval(() => {
-    if (countdownSeconds > 0) {
-      sendCommand(`title @a title §e§l${countdownSeconds}`);
-      sendCommand(`title @a subtitle §7Jangan sampai ada block yang hancur!`);
-      console.log(`⏱ Countdown: ${countdownSeconds}`);
-      countdownSeconds--;
+    if (rule) {
+      pushEvent({
+        type: rule.type === 'reduce' ? 'reduce_jail' : 'jail',
+        username: data.uniqueId,
+        nickname: data.nickname,
+        seconds: rule.seconds,
+        giftName: data.giftName,
+      });
     } else {
-      winGame();
+      // Gift lain: koin × 10 detik
+      const coins = data.diamondCount || data.giftCost || 1;
+      pushEvent({
+        type: 'jail',
+        username: data.uniqueId,
+        nickname: data.nickname,
+        seconds: coins * 10,
+        giftName: data.giftName,
+        coins: coins,
+      });
     }
-  }, 1000);
+  });
+
+  // --- FOLLOW ---
+  tiktokConnection.on('follow', (data) => {
+    pushEvent({
+      type: 'respawn',
+      username: data.uniqueId,
+      nickname: data.nickname,
+    });
+  });
+
+  tiktokConnection.on('disconnected', () => {
+    console.warn('[TikTok] Disconnected. Reconnecting in 5s...');
+    setTimeout(() => connectTikTok(username), 5000);
+  });
+
+  tiktokConnection.on('error', (err) => {
+    console.error('[TikTok] Error:', err.message);
+  });
 }
 
-function cancelCountdown() {
-  console.log('🔴 Block hancur! Countdown dibatalkan.');
-  stopCountdown();
-  sendCommand(`title @a title §c§lGAGAL!`);
-  sendCommand(`title @a subtitle §7Block hancur! Isi lagi kotaknya.`);
-  sendCommand(`tellraw @a {"rawtext":[{"text":"§cCountdown dibatalkan! Ada block yang hancur."}]}`);
+if (TIKTOK_USERNAME) {
+  connectTikTok(TIKTOK_USERNAME);
 }
 
-function stopCountdown() {
-  if (countdownInterval) {
-    clearInterval(countdownInterval);
-    countdownInterval = null;
+// ============================================================
+// MIDDLEWARE AUTH
+// ============================================================
+
+function authMiddleware(req, res, next) {
+  const secret = req.headers['x-secret'];
+  if (secret !== ROBLOX_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
-  countdownSeconds = 0;
+  next();
 }
 
-// ── Menang ────────────────────────────────────────────
-function winGame() {
-  stopCountdown();
-  stopChecking();
+// ============================================================
+// ENDPOINTS
+// ============================================================
 
-  console.log('🎉 MENANG!');
-
-  sendCommand(`title @a title §6§lMENANG! 🎉`);
-  sendCommand(`title @a subtitle §e§lViewer gagal hancurin kotak!`);
-  sendCommand(`tellraw @a {"rawtext":[{"text":"§6§l🎉 SELAMAT! Kamu berhasil mempertahankan kotak!"}]}`);
-
-  for (let i = 0; i < 5; i++) {
-    setTimeout(() => {
-      sendCommand(`summon fireworks_rocket ~ ~ ~`);
-      sendCommand(`summon fireworks_rocket ~2 ~ ~`);
-      sendCommand(`summon fireworks_rocket ~-2 ~ ~`);
-      sendCommand(`summon fireworks_rocket ~ ~ ~2`);
-      sendCommand(`summon fireworks_rocket ~ ~ ~-2`);
-    }, i * 600);
-  }
-
-  setTimeout(() => {
-    console.log('🔄 Game reset, siap main lagi');
-    buildBox();
-    sendCommand(`tellraw @a {"rawtext":[{"text":"§7Game reset. Isi kotak lagi untuk main!"}]}`);
-    startChecking();
-  }, 10000);
-}
-
-// ── Spawn TNT ──────────────────────────────────────────
-function spawnTNT(count) {
-  console.log(`💣 Spawn ${count} TNT ke dalam kotak`);
-
-  for (let i = 0; i < count; i++) {
-    setTimeout(() => {
-      const randX = BOX.x1 + Math.floor(Math.random() * 10);
-      const randZ = BOX.z1 + Math.floor(Math.random() * 10);
-      const spawnY = BOX.y2 + 10;
-
-      sendCommand(`summon tnt ${randX} ${spawnY} ${randZ}`);
-    }, i * 300);
-  }
-}
-
-// ── TikTok Events ──────────────────────────────────────
-tiktokLive.on('connected', () => {
-  console.log('🎵 TikTok Live terhubung: leodandicaprio');
-});
-
-tiktokLive.on('disconnected', () => {
-  console.log('🔴 TikTok Live disconnect');
-});
-
-tiktokLive.on('error', (err) => {
-  console.error('TikTok error:', err.message);
-});
-
-tiktokLive.on('follow', (data) => {
-  console.log(`👤 Follow dari: ${data.uniqueId} → 1 TNT`);
-  sendCommand(`tellraw @a {"rawtext":[{"text":"§e${data.uniqueId} follow! 💣 +1 TNT"}]}`);
-  spawnTNT(1);
-});
-
-tiktokLive.on('gift', (data) => {
-  if (data.giftType === 1 || data.repeatEnd) {
-    const tntCount = data.diamondCount * data.repeatCount;
-    console.log(`🎁 Gift dari: ${data.uniqueId} | ${data.giftName} x${data.repeatCount} = ${tntCount} TNT`);
-    sendCommand(`tellraw @a {"rawtext":[{"text":"§6${data.uniqueId} kasih ${data.giftName} x${data.repeatCount}! 💣 +${tntCount} TNT"}]}`);
-    spawnTNT(tntCount);
-  }
-});
-
-// ── Connect TikTok ─────────────────────────────────────
-tiktokLive.connect().catch((err) => {
-  console.error('Gagal konek TikTok:', err.message);
-});
-
-// ── HTTP Server ────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: 'online',
-    minecraft: minecraftSocket ? 'connected' : 'disconnected',
-    tiktok: 'leodandicaprio',
-    countdown: countdownInterval ? countdownSeconds : 'inactive'
+    status: 'ok',
+    connected: tiktokConnection?.isConnected || false,
+    queueLength: eventQueue.length,
   });
 });
 
-app.listen(HTTP_PORT, () => {
-  console.log(`🌐 HTTP server jalan di port ${HTTP_PORT}`);
-  console.log(`🔌 WebSocket server jalan di port ${WS_PORT}`);
+app.get('/roblox-events', authMiddleware, (req, res) => {
+  const events = [...eventQueue];
+  eventQueue.length = 0;
+  res.json({ events });
+});
+
+app.post('/connect', authMiddleware, (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  connectTikTok(username);
+  res.json({ status: 'connecting', username });
+});
+
+app.post('/disconnect', authMiddleware, (req, res) => {
+  if (tiktokConnection) tiktokConnection.disconnect();
+  res.json({ status: 'disconnected' });
+});
+
+app.listen(PORT, () => {
+  console.log(`[Server] Running on port ${PORT}`);
 });
