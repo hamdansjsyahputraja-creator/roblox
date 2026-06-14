@@ -7,7 +7,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const ROBLOX_SECRET = process.env.ROBLOX_SECRET || 'roblox123';
 const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME || '';
-const TIKTOK_SESSION_ID = process.env.TIKTOK_SESSION_ID || '';
 
 // ============================================================
 // GIFT CONFIG
@@ -45,7 +44,6 @@ function connectTikTok(username) {
   }
 
   tiktokConnection = new WebcastPushConnection(username, {
-    sessionId: TIKTOK_SESSION_ID,
     enableExtendedGiftInfo: true,
   });
 
@@ -67,7 +65,6 @@ function connectTikTok(username) {
         giftName: data.giftName,
       });
     } else {
-      // Gift lain: koin × 10 detik
       const coins = data.diamondCount || data.giftCost || 1;
       pushEvent({
         type: 'jail',
